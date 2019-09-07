@@ -1,3 +1,24 @@
+/* My SDK has been modified to have NONOSDK set to the SDK version
+ * so I can select between 6 different versions of the SDK.
+ * these definitions are to make this file backward compatible.
+ * And yes, for the current ESP8266/Arduino that means this file is not
+ * used.
+ */
+#ifndef NONOSDK
+#ifdef NONOSDK3V0
+  #define NONOSDK 300000
+#else
+  #ifdef NONOSDK22y
+    #define NONOSDK 222100
+  #else
+    #define NONOSDK 221000
+  #endif
+#endif
+#endif
+
+
+/* Now the code required by newer SDK3 versions */
+
 #if NONOSDK>=300109
 extern "C" {
 
@@ -86,4 +107,4 @@ void ICACHE_FLASH_ATTR user_pre_init(void)
 }
 
 }
-#endif // NONOSDK3V0
+#endif // NONOSDK>=300109
