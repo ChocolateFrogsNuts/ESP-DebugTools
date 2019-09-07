@@ -6,6 +6,13 @@
 
 # Requires the git version of esp8266/Arduino as we use the nm tool.
 
+# Indirect calls via registers are not handled, but for now that is not a
+# problem as we are mostly interested in ets_intr_lock/ets_intr_unlock which
+# are always called directly in the rom.
+# There are a couple of functions the script does not find the call to, 
+# probably due to an indirect call, however these appear to be related to 
+# sip_* functions and those are not used by the esp8266/Arduino code.
+
 my %tree;
 my $irq_locked=0;
 

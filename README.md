@@ -17,3 +17,13 @@ DebugTools.ino tying them together / providing examples of use.
 See config.h to turn on/off various tests and settings.
 Update credentials.h with your wifi network details.
 
+
+Scripts
+-------
+stack_decode.pl looks at the .elf and .ld files to provide a more
+comprehensive (and sometimes better) stack decode.
+It also tries to traverse the stack in both directions.
+
+calltree.pl reads Trebisky's decoded boot.txt available from 
+https://github.com/trebisky/esp8266/tree/master/reverse/bootrom
+to build a call tree for functions in the rom.
