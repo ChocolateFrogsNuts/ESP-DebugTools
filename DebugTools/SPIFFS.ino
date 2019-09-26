@@ -8,14 +8,54 @@
 #define RANDOM_COPY "/randomdata.new"
 #define RANDOM_BUFSIZE 1024
 
-void spiffs_test() {
-  Serial.println("Configuring SPIFFS");
-  SPIFFSConfig cfg;
-  cfg.setAutoFormat(false);
-  SPIFFS.setConfig(cfg);
-  Serial.print("Mounting FS\n");
-  SPIFFS.begin();
-  
+void spiffs_speed_test(bool with_write) {
+  // Copy a largish test file (100K)
+  if (SPIFFS.exists(RANDOM_DATA)) {
+     if (with_write)
+        Serial.print("Copying random test data\n");
+     else
+        Serial.print("Reading random test data\n");
+        
+     unsigned char *buf = (unsigned char *)malloc(RANDOM_BUFSIZE);
+     unsigned long tstart=millis();
+     unsigned long total=0;
+     int i;
+     
+     for (i = 0; i<10; i++) {
+         Serial.printf("  Pass %d\n", i);
+         File in, out;
+         in = SPIFFS.open(RANDOM_DATA,"r");
+         if (with_write) out= SPIFFS.open(RANDOM_COPY,"w+");
+         long remain = in.size();
+         long bs, br, bw;
+         while (in.available()) {
+            bs = (remain>RANDOM_BUFSIZE) ? RANDOM_BUFSIZE : remain;
+            br = in.read(buf, bs);
+            if (br < bs) Serial.write("ERROR: short read\n");
+            if (with_write) {
+               bw = out.write(buf, br);
+               if (bw < br) Serial.write("ERROR: short write\n");
+            }
+            remain -= br;
+            total += br;
+         }
+         in.close();
+         if (with_write) out.close();
+     }
+
+     unsigned long tend = millis();
+     free(buf);
+     if (with_write)
+        Serial.printf("%d copies took %ldms\n", i, tend - tstart);
+     else
+        Serial.printf("%d passes took %ldms\n", i, tend - tstart);
+     Serial.printf("Total size %ld, rate=%f bytes/ms (==K/s)\n", total, (double)total/(tend-tstart));
+  } else {
+     Serial.printf("%s not found, skipping speed test\n", RANDOM_DATA);
+  }  
+}
+
+void spiffs_data_test() {
   for (int i=0; i<3; i++) {
     Serial.print("Testing write to ");
     Serial.println(WRITE_FNAME);
@@ -39,42 +79,20 @@ void spiffs_test() {
     fh.close();
     }
   }
+}
 
-  // Copy a largish test file (100K)
-  if (SPIFFS.exists(RANDOM_DATA)) {
-     Serial.print("Copying random test data\n");
-     unsigned char *buf = (unsigned char *)malloc(RANDOM_BUFSIZE);
-     unsigned long tstart=millis();
-     unsigned long total=0;
-     int i;
-     
-     for (i = 0; i<10; i++) {
-         Serial.printf("  Copy %d\n", i);
-         File in = SPIFFS.open(RANDOM_DATA,"r");
-         File out= SPIFFS.open(RANDOM_COPY,"w+");
-         long remain = in.size();
-         long bs, br, bw;
-         while (in.available()) {
-            bs = (remain>RANDOM_BUFSIZE) ? RANDOM_BUFSIZE : remain;
-            br = in.read(buf, bs);
-            if (br < bs) Serial.write("ERROR: short read\n");
-            bw = out.write(buf, br);
-            if (bw < br) Serial.write("ERROR: short write\n");
-            remain -= br;
-            total += br;
-         }
-         in.close();
-         out.close();
-     }
-
-     unsigned long tend = millis();
-     free(buf);
-     Serial.printf("%d copies took %ldms\n", i, tend - tstart);
-     Serial.printf("Total size %ld, rate=%f bytes/ms (==K/s)\n", total, (double)total/(tend-tstart));
-  } else {
-     Serial.printf("%s not found, skipping speed test\n", RANDOM_DATA);
-  }
   
+void spiffs_test() {
+  Serial.println("Configuring SPIFFS");
+  SPIFFSConfig cfg;
+  cfg.setAutoFormat(false);
+  SPIFFS.setConfig(cfg);
+  Serial.print("Mounting FS\n");
+  SPIFFS.begin();
+
+  //spiffs_data_test();
+  spiffs_speed_test(false); // read-only
+  //spiffs_speed_test(true);  // read-write
   
   Serial.print("Unmounting FS\n");
   SPIFFS.end();
