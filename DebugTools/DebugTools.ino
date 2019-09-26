@@ -120,11 +120,15 @@ void setup() {
   gdbstub_init();
   #endif
   
+  Serial.printf("FLASH_SIZE_MAP=%d\n", system_get_flash_size_map());
+
+  #if FLASH_SPEEDTEST
+  flash_speed_test();
+  #endif
+
   #if FS_TEST
   spiffs_test();
   #endif
-
-  Serial.printf("FLASH_SIZE_MAP=%d\n", system_get_flash_size_map());
 
 #if STATE_CAPTURE_US
   Serial.print("Init States\n");

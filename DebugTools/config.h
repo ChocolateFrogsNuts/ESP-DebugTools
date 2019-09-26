@@ -34,6 +34,8 @@
 // Testing SPIFFS
 #define FS_TEST 0
 
+#define FLASH_SPEEDTEST 1
+
 #define WITH_MEMTEST 0
 
 // include /initialize the GDB stub for debugging
