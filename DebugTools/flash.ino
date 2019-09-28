@@ -3,7 +3,174 @@
 
 #if FLASH_SPEEDTEST
 
-#include "flash_hal.h"
+#include <SPI.h>
+
+#include "user_interface.h"
+
+#define memw() asm("memw");
+
+ICACHE_RAM_ATTR void spi0_setDataLengths(uint8_t mosi_bits, uint8_t miso_bits) {
+  #ifdef ESP32
+    // placeholder to remind someone to fix this
+    #error ESP32 not yet supported
+  #else
+    if (mosi_bits!=0) mosi_bits--;
+    if (miso_bits!=0) miso_bits--;
+    //Serial.printf("SPI0U1:=%08x\n", (miso_bits<<8)|(mosi_bits<<17));
+    SPI0U1 = (miso_bits << 8) | (mosi_bits << 17);
+  #endif
+}
+
+ICACHE_RAM_ATTR int spi0_command(uint8_t cmd, uint32_t *data, uint32_t data_bits, uint32_t read_bits) {
+  if (data_bits>(64*8)) return 1;
+  if (read_bits>(64*8)) return 1;
+
+  uint32_t old_spi_usr = SPI0U;
+  uint32_t old_spi_usr2= SPI0U2;
+
+  uint32_t flags=(1<<31); //SPI_USR_COMMAND
+  if (read_bits>0) flags |= (1<<28); // SPI_USR_MISO
+  if (data_bits>0) flags |= (1<<27); // SPI_USR_MOSI
+  spi0_setDataLengths(data_bits, read_bits);
+  //Serial.printf("SPI0U:=%08x, SPI0U2:=%08x\n", flags, (7<<28)|cmd);
+  SPI0U = flags;
+  SPI0U2= (7<<28) | cmd;
+
+  // copy the outcoing data to the SPI hardware
+  if (data_bits>0) {
+     //uint32_t *src=data;
+     //volatile uint32_t *dst=&(SPI0W0);
+     //for (uint32_t i=0; i<=(data_bits/sizeof(uint32_t)); i++) *dst++=*src++;
+
+     //Serial.printf("SPI0W0:=%08x\n", *data);
+     SPI0W0 = *data;
+  } else {
+     //Serial.printf("SPI0W0:=0\n");
+     SPI0W0 = 0;
+  }
+  //Serial.printf("SPI0CMD:=%08x\n", SPICMDUSR);
+  memw();
+  SPI0CMD = SPICMDUSR;
+
+  // wait for the command to complete
+  while (SPI0CMD & SPICMDUSR) { }
+  
+  if (read_bits>0) {
+    // copy the response back to the buffer
+    //volatile uint32_t *src=&(SPI0W0);
+    //uint32_t *dst=data;
+    //for (uint32_t i=0; i<=(read_bits/sizeof(uint32_t)); i++) *dst++=*src++;
+    *data = SPI0W0;
+    //Serial.printf("SPI0W0 == %08x\n", *data);
+  }
+  
+  SPI0U = old_spi_usr;
+  SPI0U2= old_spi_usr2;
+  return 0;
+}
+
+// ROM functions not in user_interface.h
+extern "C" void SelectSpiFunction();
+extern "C" void spi_flash_attach();
+extern "C" SpiFlashOpResult SPI_read_status(SpiFlashChip *fc, uint32_t *st);
+extern "C" SpiFlashOpResult SPI_write_status(SpiFlashChip *fc, uint32_t st);
+extern "C" uint32_t SPIParamCfg(uint32_t deviceId, uint32_t chip_size, uint32_t block_size, uint32_t sector_size, uint32_t page_size, uint32_t status_mask);
+
+#ifndef SPI_FLASH_VENDOR_XMC
+#define SPI_FLASH_VENDOR_XMC 0x20
+#endif
+
+ICACHE_RAM_ATTR void flash_xmc_check() {
+  if (ESP.getFlashChipVendorId() == SPI_FLASH_VENDOR_XMC) {
+
+     #if 0
+     Serial.printf("flashchip: ID:%08x, smask:%08x\n", flashchip->deviceId, flashchip->status_mask);
+     int rc=SPIParamCfg(ESP.getFlashChipId(), flashchip->chip_size,
+                        flashchip->block_size, flashchip->sector_size,
+                        flashchip->page_size, 0x00ffffff);
+     Serial.printf("flashchip: ID:%08x, smask:%08x,  rc=%d\n", flashchip->deviceId, flashchip->status_mask, rc);
+     #endif
+     
+     //Serial.print("SelectSpiFunction()\n");
+     //SelectSpiFunction();
+
+     //Serial.print("spi_flash_attach()\n");
+     //spi_flash_attach();
+     
+     Serial.print("Read SR3\n");
+     uint32_t SR, SR1,SR2,SR3, newSR3;
+     if (SPI_read_status(flashchip, &SR) != SPI_FLASH_RESULT_OK) {
+        Serial.print("SPI_read_status error\n");
+     }
+     Serial.printf("SPI_read_status SR=%08x\n", SR);
+     
+     if (spi0_command(0x05, &SR1, 0, 8)) {
+        Serial.printf("spi0_command(read SR1) failed\n");
+     }
+     if (spi0_command(0x35, &SR2, 0, 8)) {
+        Serial.printf("spi0_command(read SR2) failed\n");
+     }
+     if (spi0_command(0x15, &SR3, 0, 8)) {
+        Serial.printf("spi0_command(read SR3) failed\n");
+     }
+     
+     Serial.printf("XMC Flash found, SR1=%02x, SR2=%02x, SR3=%02x\n", SR1,SR2,SR3);
+     newSR3=SR3;
+     
+     // XMC chips default to 75% drive on their outpouts during read,
+     // but can be switched to 100% by setting SR3:DRV0,DRV1 to 1,1.
+     // Only needed if we are trying to run >26MHz.
+     int ffreq = ESP.getFlashChipSpeed()/1000000;
+     if (ffreq > 26) {
+        uint32_t drv;
+        //drv = 0; // 50%
+        //drv = 1; // 25%
+        //drv = 2; // 75%
+        drv = 3; // 100%
+
+        newSR3 = (newSR3 & ~0x60) | (drv << 5);
+     }
+
+     // Additionally they have a high-frequency mode that holds pre-charge on the
+     // internal charge pump, keeping the access voltage more readily available.
+     // Only for QPI mode (which we don't use)
+     if (ffreq > 40) {
+        // SR3:HFM=1
+        // newSR3|=0x10;
+     }
+
+     Serial.printf("New SR3=%02x\n", newSR3);
+     #if 1
+     if (newSR3 != SR3) {
+        #if 1
+          if (spi0_command(0x50,NULL,0,0)) {
+             Serial.print("spi0_command(write volatile enable) failed\n");
+          }
+          if (spi0_command(0x11,&newSR3,8,0)) {
+             Serial.print("spi0_command(write SR3) failed\n");
+          }
+          if (spi0_command(0x04,NULL,0,0)) {
+             Serial.print("spi0_command(write disable) failed\n");
+          }
+          if (spi0_command(0x15, &SR3, 0, 8)) {
+             Serial.printf("spi0_command(re-read SR3) failed\n");
+          }
+        #else
+          SR = (SR & 0xffff) | (newSR3<<16);
+          if (SPI_write_status(flashchip, SR) != SPI_FLASH_RESULT_OK) {
+             Serial.print("SPI_writestatus error\n");
+          }
+          if (SPI_read_status(flashchip, &SR) != SPI_FLASH_RESULT_OK) {
+             Serial.print("SPI_read_status error\n");
+          }
+        #endif
+        Serial.printf("Updated SR3=%08x\n",SR3);
+     }
+     #endif
+  }
+
+}
+
 
 const char *flashMode(uint8_t m) {
   switch (m) {
@@ -20,20 +187,26 @@ void flash_speed_test() {
   // read-only direct flash speed test.
   // Reads 1MB of data from the flash chip
 
+  flash_xmc_check();
+
   uint32 addr;
   unsigned long total=0;
-  int bs=FS_PHYS_BLOCK;
+  int bs=flashchip->sector_size;
   uint32 *buf=(uint32 *)malloc(bs);
 
-  Serial.printf("Running flash read speed test\n");
-  Serial.printf("Chip ID:%08x\n", ESP.getFlashChipId());
-  Serial.printf("CPU Freq:%d MHz\n", ESP.getCpuFreqMHz());
-  Serial.printf("Flash Speed:%d MHz  %s\n", ESP.getFlashChipSpeed()/1000000, flashMode(ESP.getFlashChipMode()));
-  Serial.printf("bs=%d\n", bs);
-  unsigned long tstart=millis();
+  Serial.printf("\nCPU Freq:%d MHz, Flash:%d MHz  %s\n", 
+      ESP.getCpuFreqMHz(), ESP.getFlashChipSpeed()/1000000, flashMode(ESP.getFlashChipMode()));
+  Serial.printf("SPI Flash Parameters (flashchip->*):\n   ID:%08x, size:%d, bsize:%d, ssize:%d, psize:%d, smask:%08x\n",
+      flashchip->deviceId, flashchip->chip_size, flashchip->block_size,
+      flashchip->sector_size, flashchip->page_size, flashchip->status_mask);
+  Serial.printf("ESP.get* :\n   ID:%08x, size:%d, realSize:%d\n", 
+      ESP.getFlashChipId(), ESP.getFlashChipSize(), ESP.getFlashChipRealSize());
+
+  Serial.printf("Running flash read speed test, bs=%d\n",bs);
 
   uint32 startaddr= 0;
   uint32 endaddr  = 102400;
+  unsigned long tstart=millis();
   
   for (int i=0; i<10; i++) {
     addr=startaddr;
@@ -51,7 +224,7 @@ void flash_speed_test() {
   free(buf);
   Serial.printf("Read %ld bytes from flash in %ld ms = %f bytes/ms\n",
      total, tend - tstart, (double)total/(tend - tstart));
-  Serial.printf("%d, %d %s, %ldms, %f\n", 
+  Serial.printf("%d, %d %s, %ldms, %f\n\n", 
      ESP.getCpuFreqMHz(), ESP.getFlashChipSpeed()/1000000, 
      flashMode(ESP.getFlashChipMode()),
      tend - tstart, (double)total/(tend - tstart));
