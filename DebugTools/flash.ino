@@ -38,12 +38,10 @@ ICACHE_RAM_ATTR int spi0_command(uint8_t cmd, uint32_t *data, uint32_t data_bits
 
   // copy the outcoing data to the SPI hardware
   if (data_bits>0) {
-     //uint32_t *src=data;
-     //volatile uint32_t *dst=&(SPI0W0);
-     //for (uint32_t i=0; i<=(data_bits/sizeof(uint32_t)); i++) *dst++=*src++;
-
-     //Serial.printf("SPI0W0:=%08x\n", *data);
-     SPI0W0 = *data;
+     uint32_t *src=data;
+     volatile uint32_t *dst=&(SPI0W0);
+     //Serial.printf("SPI0W0:=%08x\n",*src);
+     for (uint32_t i=0; i<=(data_bits/sizeof(uint32_t)); i++) *dst++=*src++;
   } else {
      //Serial.printf("SPI0W0:=0\n");
      SPI0W0 = 0;
@@ -80,6 +78,24 @@ extern "C" uint32_t SPIParamCfg(uint32_t deviceId, uint32_t chip_size, uint32_t 
 #define SPI_FLASH_VENDOR_XMC 0x20
 #endif
 
+#define SPI_FLASH_XMC_DRV_25  1
+#define SPI_FLASH_XMC_DRV_50  0
+#define SPI_FLASH_XMC_DRV_75  2
+#define SPI_FLASH_XMC_DRV_100 3
+
+#define SPI_FLASH_XMC_DRV_S   5
+#define SPI_FLASH_XMC_DRV_MASK 0x03
+
+#define SPI_FLASH_RSR1  0x05
+#define SPI_FLASH_RSR2  0x35
+#define SPI_FLASH_RSR3  0x15
+#define SPI_FLASH_WSR1  0x01
+#define SPI_FLASH_WSR2  0x31
+#define SPI_FLASH_WSR3  0x11
+#define SPI_FLASH_WEVSR 0x50
+#define SPI_FLASH_WREN  0x06
+#define SPI_FLASH_WRDI  0x04
+
 ICACHE_RAM_ATTR void flash_xmc_check() {
   if (ESP.getFlashChipVendorId() == SPI_FLASH_VENDOR_XMC) {
 
@@ -104,13 +120,13 @@ ICACHE_RAM_ATTR void flash_xmc_check() {
      }
      Serial.printf("SPI_read_status SR=%08x\n", SR);
      
-     if (spi0_command(0x05, &SR1, 0, 8)) {
+     if (spi0_command(SPI_FLASH_RSR1, &SR1, 0, 8)) {
         Serial.printf("spi0_command(read SR1) failed\n");
      }
-     if (spi0_command(0x35, &SR2, 0, 8)) {
+     if (spi0_command(SPI_FLASH_RSR2, &SR2, 0, 8)) {
         Serial.printf("spi0_command(read SR2) failed\n");
      }
-     if (spi0_command(0x15, &SR3, 0, 8)) {
+     if (spi0_command(SPI_FLASH_RSR3, &SR3, 0, 8)) {
         Serial.printf("spi0_command(read SR3) failed\n");
      }
      
@@ -122,13 +138,8 @@ ICACHE_RAM_ATTR void flash_xmc_check() {
      // Only needed if we are trying to run >26MHz.
      int ffreq = ESP.getFlashChipSpeed()/1000000;
      if (ffreq > 26) {
-        uint32_t drv;
-        //drv = 0; // 50%
-        //drv = 1; // 25%
-        //drv = 2; // 75%
-        drv = 3; // 100%
-
-        newSR3 = (newSR3 & ~0x60) | (drv << 5);
+        newSR3 &= ~(SPI_FLASH_XMC_DRV_MASK << SPI_FLASH_XMC_DRV_S);
+        newSR3 |= (SPI_FLASH_XMC_DRV_100 << SPI_FLASH_XMC_DRV_S);
      }
 
      // Additionally they have a high-frequency mode that holds pre-charge on the
@@ -143,16 +154,16 @@ ICACHE_RAM_ATTR void flash_xmc_check() {
      #if 1
      if (newSR3 != SR3) {
         #if 1
-          if (spi0_command(0x50,NULL,0,0)) {
+          if (spi0_command(SPI_FLASH_WEVSR,NULL,0,0)) {
              Serial.print("spi0_command(write volatile enable) failed\n");
           }
-          if (spi0_command(0x11,&newSR3,8,0)) {
+          if (spi0_command(SPI_FLASH_WSR3,&newSR3,8,0)) {
              Serial.print("spi0_command(write SR3) failed\n");
           }
-          if (spi0_command(0x04,NULL,0,0)) {
+          if (spi0_command(SPI_FLASH_WRDI,NULL,0,0)) {
              Serial.print("spi0_command(write disable) failed\n");
           }
-          if (spi0_command(0x15, &SR3, 0, 8)) {
+          if (spi0_command(SPI_FLASH_RSR3, &SR3, 0, 8)) {
              Serial.printf("spi0_command(re-read SR3) failed\n");
           }
         #else
@@ -171,6 +182,25 @@ ICACHE_RAM_ATTR void flash_xmc_check() {
 
 }
 
+
+// Minimal version for startup code
+void flash_xmc_check2() {
+  if (ESP.getFlashChipVendorId() == SPI_FLASH_VENDOR_XMC) {
+     uint32_t SR3, newSR3;
+     if (!spi0_command(SPI_FLASH_RSR3, &SR3, 0, 8)) { // read SR3
+        newSR3=SR3;
+        if (ESP.getFlashChipSpeed()>26000000) { // >26Mhz?
+           newSR3 &= ~(SPI_FLASH_XMC_DRV_MASK << SPI_FLASH_XMC_DRV_S);
+           newSR3 |= (SPI_FLASH_XMC_DRV_100 << SPI_FLASH_XMC_DRV_S);
+        }
+        if (newSR3 != SR3) { // only write if changed
+           if (!spi0_command(SPI_FLASH_WEVSR,NULL,0,0))  // write enable volatile SR
+              spi0_command(SPI_FLASH_WSR3,&newSR3,8,0);  // write to SR3
+           spi0_command(SPI_FLASH_WRDI,NULL,0,0);        // write disable - probably not needed
+        }
+     }
+  }
+}
 
 const char *flashMode(uint8_t m) {
   switch (m) {
