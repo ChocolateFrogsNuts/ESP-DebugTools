@@ -6,7 +6,7 @@
 
 #define RANDOM_DATA "/randomdata"
 #define RANDOM_COPY "/randomdata.new"
-#define RANDOM_BUFSIZE 1024
+#define RANDOM_BUFSIZE 8192
 
 void spiffs_speed_test(bool with_write) {
   // Copy a largish test file (100K)
