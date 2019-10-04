@@ -7,63 +7,132 @@
 
 #include "user_interface.h"
 
-#define memw() asm("memw");
+/*
+ * This file contains C translations of some of the ROM code for SPI flash chips
+ * as well as a couple of extra funcs for sending user-defined SPI flash commands.
+ */
 
-ICACHE_RAM_ATTR void spi0_setDataLengths(uint8_t mosi_bits, uint8_t miso_bits) {
+#define memw() asm("memw");
+extern "C" int Wait_SPI_Idle(SpiFlashChip *fc);
+
+uint32_t SPI_read_status_(SpiFlashChip *fc, uint32_t *st) {
+  do {
+    SPI0RS=0;
+    SPI0CMD=SPICMDRDSR;
+    while (SPI0CMD) {}
+  } while ((*st=(SPI0RS & fc->status_mask)) & SPIRSBUSY);
+  return SPI_FLASH_RESULT_OK;
+}
+
+uint32_t SPI_write_status_(SpiFlashChip *fc, uint32_t st) {
+  Wait_SPI_Idle(fc);
+  SPI0RS=st;
+  SPI0CMD=SPICMDWRSR;
+  while (SPI0CMD) {}
+  return SPI_FLASH_RESULT_OK;
+}
+
+uint32_t SPI_read_(uint32_t addr, uint8_t *dst, uint32_t len) {
+  if (len==0) return SPI_FLASH_RESULT_OK;
+  Wait_SPI_Idle(flashchip);
+  uint8_t *src = (uint8_t *)&(SPI0W0);
+  if (len<=32) {
+     // translated from asm - rom does small xfers like this
+     SPI0A = addr | (len<<24);
+     SPI0CMD = SPICMDREAD;
+     while (SPI0CMD) {}
+     memcpy(dst, src, len);
+  } else {
+     // not translated from asm - rom may do this differently.
+     // ie it may support DMA or some other bulk xfer mechanism.
+     while (len>32) {
+        SPI0A = addr | (32<<24);
+        SPI0CMD = SPICMDREAD;
+        while (SPI0CMD) {}
+        memcpy(dst, src, len);
+        addr+=32;
+        dst+=32;
+        len-=32;
+     }
+     SPI0A = addr | (len<<24);
+     SPI0CMD = SPICMDREAD;
+     while (SPI0CMD) {}
+     memcpy(dst, src, len);
+  }
+  return SPI_FLASH_RESULT_OK;
+}
+
+ICACHE_RAM_ATTR 
+void inline spi0_setDataLengths(uint8_t mosi_bits, uint8_t miso_bits) {
   #ifdef ESP32
-    // placeholder to remind someone to fix this
+    // placeholder to remind someone to fix this if they port it to ESP32
     #error ESP32 not yet supported
+    // *(base+0x28) = (mosi_bits>0 ? mosi_bits-1 : 0);
+    // *(base+0x2c) = (miso_bits>0 ? miso_bits-1 : 0);
   #else
     if (mosi_bits!=0) mosi_bits--;
     if (miso_bits!=0) miso_bits--;
-    //Serial.printf("SPI0U1:=%08x\n", (miso_bits<<8)|(mosi_bits<<17));
-    SPI0U1 = (miso_bits << 8) | (mosi_bits << 17);
+    mosi_bits &= SPIMMOSI;
+    miso_bits &= SPIMMISO;
+    //Serial.printf("SPI0U1(%p):=%08x\n", &(SPI0U1), (miso_bits<<SPILMISO)|(mosi_bits<<SPILMOSI));
+    SPI0U1 = (miso_bits << SPILMISO) | (mosi_bits << SPILMOSI);
   #endif
 }
 
-ICACHE_RAM_ATTR int spi0_command(uint8_t cmd, uint32_t *data, uint32_t data_bits, uint32_t read_bits) {
+/* spi0_command: send a custom SPI command. */
+ICACHE_RAM_ATTR 
+int spi0_command(uint8_t cmd, uint32_t *data, uint32_t data_bits, uint32_t read_bits) {
   if (data_bits>(64*8)) return 1;
   if (read_bits>(64*8)) return 1;
 
+  Wait_SPI_Idle(flashchip);
+  
   uint32_t old_spi_usr = SPI0U;
   uint32_t old_spi_usr2= SPI0U2;
+  uint32_t old_spi_c   = SPI0C;
+  
+  uint32_t c = SPI0C;
+  c &= ~(SPICQIO | SPICDIO | SPICQOUT | SPICDOUT | SPICAHB | SPICFASTRD);
+  c |= SPICRESANDRES | SPICSHARE | SPICWPR | SPIC2BSE;
+  SPI0C = c;
 
-  uint32_t flags=(1<<31); //SPI_USR_COMMAND
-  if (read_bits>0) flags |= (1<<28); // SPI_USR_MISO
-  if (data_bits>0) flags |= (1<<27); // SPI_USR_MOSI
+  //SPI0S &= ~(SPISE|SPISBE|SPISSE|SPISCD);
+ 
+  uint32_t flags=SPIUCOMMAND; //SPI_USR_COMMAND
+  if (read_bits>0) flags |= SPIUMISO; // SPI_USR_MISO
+  if (data_bits>0) flags |= SPIUMOSI; // SPI_USR_MOSI
   spi0_setDataLengths(data_bits, read_bits);
-  //Serial.printf("SPI0U:=%08x, SPI0U2:=%08x\n", flags, (7<<28)|cmd);
   SPI0U = flags;
-  SPI0U2= (7<<28) | cmd;
+  SPI0U2= ((7 & SPIMCOMMAND)<<SPILCOMMAND) | cmd;
 
-  // copy the outcoing data to the SPI hardware
+  // copy the outgoing data to the SPI hardware
   if (data_bits>0) {
      uint32_t *src=data;
      volatile uint32_t *dst=&(SPI0W0);
-     //Serial.printf("SPI0W0:=%08x\n",*src);
-     for (uint32_t i=0; i<=(data_bits/sizeof(uint32_t)); i++) *dst++=*src++;
-  } else {
-     //Serial.printf("SPI0W0:=0\n");
-     SPI0W0 = 0;
+     for (uint32_t i=0; i<=(data_bits/32); i++) *dst++=*src++;
   }
-  //Serial.printf("SPI0CMD:=%08x\n", SPICMDUSR);
-  memw();
+
+  // Start the transfer
   SPI0CMD = SPICMDUSR;
 
   // wait for the command to complete
-  while (SPI0CMD & SPICMDUSR) { }
-  
+  while (SPI0CMD & SPICMDUSR) {}
+
   if (read_bits>0) {
     // copy the response back to the buffer
-    //volatile uint32_t *src=&(SPI0W0);
-    //uint32_t *dst=data;
-    //for (uint32_t i=0; i<=(read_bits/sizeof(uint32_t)); i++) *dst++=*src++;
-    *data = SPI0W0;
-    //Serial.printf("SPI0W0 == %08x\n", *data);
+    volatile uint32_t *src=&(SPI0W0);
+    uint32_t *dst=data;
+    for (uint32_t i=0; i<=(read_bits/32); i++) *dst++=*src++;
+    // zero any unread bits in the last word
+    if (read_bits % 32) {
+       dst--;
+       *dst &= ~(0xFFFFFFFF << (read_bits % 32));       
+    }
   }
-  
+
   SPI0U = old_spi_usr;
   SPI0U2= old_spi_usr2;
+  SPI0C = old_spi_c;
   return 0;
 }
 
@@ -96,7 +165,7 @@ extern "C" uint32_t SPIParamCfg(uint32_t deviceId, uint32_t chip_size, uint32_t 
 #define SPI_FLASH_WREN  0x06
 #define SPI_FLASH_WRDI  0x04
 
-ICACHE_RAM_ATTR void flash_xmc_check() {
+void flash_xmc_check() {
   if (ESP.getFlashChipVendorId() == SPI_FLASH_VENDOR_XMC) {
 
      #if 0
@@ -106,26 +175,51 @@ ICACHE_RAM_ATTR void flash_xmc_check() {
                         flashchip->page_size, 0x00ffffff);
      Serial.printf("flashchip: ID:%08x, smask:%08x,  rc=%d\n", flashchip->deviceId, flashchip->status_mask, rc);
      #endif
-     
-     //Serial.print("SelectSpiFunction()\n");
-     //SelectSpiFunction();
 
-     //Serial.print("spi_flash_attach()\n");
-     //spi_flash_attach();
+     // test assorted flash access functions
+     uint32_t cfg=0;
+     cfg=0;
+     if (spi_flash_read(0x0000, &cfg, 4) != SPI_FLASH_RESULT_OK) {
+        Serial.print("spi_flash_read failed\n");
+     }
+     Serial.printf("spi_flash_read: first 4 bytes of flash=%08x\n",cfg);
+
+     cfg=0;
+     if (SPI_read_(0x0000, (uint8_t*)&cfg, 4) != SPI_FLASH_RESULT_OK) {
+        Serial.print("SPI_read_ failed\n");
+     }
+     Serial.printf("SPI_read_: first 4 bytes of flash=%08x\n",cfg);
      
-     Serial.print("Read SR3\n");
-     uint32_t SR, SR1,SR2,SR3, newSR3;
+     cfg=0;
+     if (spi0_command(0x03, &cfg, 24, 32)) { // 0x03 = Read Data
+        Serial.print("spi0_command: read flash failed\n");
+     }
+     Serial.printf("spi0_command: first 4 bytes of flash=%08x\n",cfg);
+     
+     uint32_t SR=0, SR1=0,SR2=0,SR3, newSR3;
+     #if 0
+     Serial.print("SPI_Read SR\n");
      if (SPI_read_status(flashchip, &SR) != SPI_FLASH_RESULT_OK) {
         Serial.print("SPI_read_status error\n");
      }
      Serial.printf("SPI_read_status SR=%08x\n", SR);
-     
+
+     if (SPI_read_status_(flashchip, &SR) != SPI_FLASH_RESULT_OK) {
+        Serial.print("SPI_read_status_ error\n");
+     }
+     Serial.printf("SPI_read_status_ SR=%08x\n", SR);
+
+     Serial.print("Read SR1\n");
      if (spi0_command(SPI_FLASH_RSR1, &SR1, 0, 8)) {
         Serial.printf("spi0_command(read SR1) failed\n");
      }
+     Serial.print("Read SR2\n");
      if (spi0_command(SPI_FLASH_RSR2, &SR2, 0, 8)) {
         Serial.printf("spi0_command(read SR2) failed\n");
      }
+     #endif
+     
+     Serial.print("Read SR3\n");
      if (spi0_command(SPI_FLASH_RSR3, &SR3, 0, 8)) {
         Serial.printf("spi0_command(read SR3) failed\n");
      }
@@ -133,7 +227,7 @@ ICACHE_RAM_ATTR void flash_xmc_check() {
      Serial.printf("XMC Flash found, SR1=%02x, SR2=%02x, SR3=%02x\n", SR1,SR2,SR3);
      newSR3=SR3;
      
-     // XMC chips default to 75% drive on their outpouts during read,
+     // XMC chips default to 75% drive on their outputs during read,
      // but can be switched to 100% by setting SR3:DRV0,DRV1 to 1,1.
      // Only needed if we are trying to run >26MHz.
      int ffreq = ESP.getFlashChipSpeed()/1000000;
@@ -154,15 +248,19 @@ ICACHE_RAM_ATTR void flash_xmc_check() {
      #if 1
      if (newSR3 != SR3) {
         #if 1
+          Serial.print("WEVSR\n");
           if (spi0_command(SPI_FLASH_WEVSR,NULL,0,0)) {
              Serial.print("spi0_command(write volatile enable) failed\n");
           }
+          Serial.print("WSR3\n");
           if (spi0_command(SPI_FLASH_WSR3,&newSR3,8,0)) {
              Serial.print("spi0_command(write SR3) failed\n");
           }
+          Serial.print("WRDI\n");
           if (spi0_command(SPI_FLASH_WRDI,NULL,0,0)) {
              Serial.print("spi0_command(write disable) failed\n");
           }
+          Serial.print("RSR3\n");
           if (spi0_command(SPI_FLASH_RSR3, &SR3, 0, 8)) {
              Serial.printf("spi0_command(re-read SR3) failed\n");
           }
