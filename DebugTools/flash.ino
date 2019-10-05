@@ -99,17 +99,16 @@ uint32_t calc_spi0u1(uint8_t mosi_bits, uint8_t miso_bits) {
  * Approx 160 bytes for cut down (32bit max) version.
  */
 IRAM_ATTR
-void // __attribute__((aligned(256)))
+void //__attribute__((aligned(256)))
 _spi0_command(uint32_t spi0c,uint32_t flags,uint32_t spi0u1,uint32_t spi0u2,
               uint32_t *data,uint32_t data_bits,uint32_t read_bits)
 {
+  Wait_SPI_Idle(flashchip);
   uint32_t old_spi_usr = SPI0U;
   uint32_t old_spi_usr2= SPI0U2;
   uint32_t old_spi_c   = SPI0C;
 
   //SPI0S &= ~(SPISE|SPISBE|SPISSE|SPISCD);
-  
-  //spi0_setDataLengths(data_bits, read_bits);
   SPI0C = spi0c;
   SPI0U = flags;
   SPI0U1= spi0u1;
@@ -160,8 +159,6 @@ int spi0_command(uint8_t cmd, uint32_t *data, uint32_t data_bits, uint32_t read_
   if (data_bits>(4*8)) return 1;
   if (read_bits>(4*8)) return 1;
 #endif
-
-  Wait_SPI_Idle(flashchip);
 
   uint32_t flags=SPIUCOMMAND; //SPI_USR_COMMAND
   if (read_bits>0) flags |= SPIUMISO; // SPI_USR_MISO
