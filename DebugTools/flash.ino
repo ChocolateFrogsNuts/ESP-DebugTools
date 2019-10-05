@@ -16,7 +16,7 @@
  * Defined:     full generic version for up to 512 bits of data in/out.
  * Not Defined: cut down version with max 32 bits of data in/out.
  */
-//#define SPI0_COMMAND_FULLVER
+#define SPI0_COMMAND_FULLVER
 
 #define memw() asm("memw");
 extern "C" int Wait_SPI_Idle(SpiFlashChip *fc);
@@ -96,12 +96,12 @@ uint32_t calc_spi0u1(uint8_t mosi_bits, uint8_t miso_bits) {
 
 /*
  * critical part of spi0_command that must be IRAM_ATTR
- * Approx 160 bytes for cut down (32bit max) version.
+ * Approx 190 bytes for cut down (32bit max) version.
  */
 IRAM_ATTR
 void //__attribute__((aligned(256)))
 _spi0_command(uint32_t spi0c,uint32_t flags,uint32_t spi0u1,uint32_t spi0u2,
-              uint32_t *data,uint32_t data_bits,uint32_t read_bits)
+              uint32_t *data,uint32_t data_words,uint32_t read_words)
 {
   Wait_SPI_Idle(flashchip);
   uint32_t old_spi_usr = SPI0U;
@@ -115,11 +115,9 @@ _spi0_command(uint32_t spi0c,uint32_t flags,uint32_t spi0u1,uint32_t spi0u2,
   SPI0U2= spi0u2;
 
   // copy the outgoing data to the SPI hardware
-  if (data_bits>0) {
+  if (data_words>0) {
      #ifdef SPI0_COMMAND_FULLVER
-       uint32_t *src=data;
-       volatile uint32_t *dst=&(SPI0W0);
-       for (uint32_t i=0; i<=(data_bits/32); i++) *dst++=*src++;
+       memcpy((void*)&(SPI0W0),data,data_words);
      #else
        SPI0W0=*data;
      #endif
@@ -131,16 +129,13 @@ _spi0_command(uint32_t spi0c,uint32_t flags,uint32_t spi0u1,uint32_t spi0u2,
   // wait for the command to complete
   while (SPI0CMD & SPICMDUSR) {}
 
-  if (read_bits>0) {
-    // copy the response back to the buffer
-    #ifdef SPI0_COMMAND_FULLVER
-      volatile uint32_t *src=&(SPI0W0);
-      uint32_t *dst=data;
-      for (uint32_t i=0; i<=(read_bits/32); i++) *dst++=*src++;
-      // zero any unread bits in the last word
-    #else
-      *data=SPI0W0;
-    #endif
+  if (read_words>0) {
+     // copy the response back to the buffer
+     #ifdef SPI0_COMMAND_FULLVER
+       memcpy(data,(void *)&(SPI0W0),read_words);
+     #else
+       *data=SPI0W0;
+     #endif
   }
 
   SPI0U = old_spi_usr;
@@ -164,13 +159,13 @@ int spi0_command(uint8_t cmd, uint32_t *data, uint32_t data_bits, uint32_t read_
   if (read_bits>0) flags |= SPIUMISO; // SPI_USR_MISO
   if (data_bits>0) flags |= SPIUMOSI; // SPI_USR_MOSI
 
-  uint32_t spi0c = (SPI0C & ~(SPICQIO | SPICDIO | SPICQOUT | SPICDOUT | SPICAHB | SPICFASTRD))
-        | (SPICRESANDRES | SPICSHARE | SPICWPR | SPIC2BSE);
-  
   uint32_t spi0u2 = ((7 & SPIMCOMMAND)<<SPILCOMMAND) | cmd;
   uint32_t spi0u1 = calc_spi0u1(data_bits, read_bits);
   
-  _spi0_command(spi0c,flags,spi0u1,spi0u2,data,data_bits,read_bits);
+  uint32_t spi0c = (SPI0C & ~(SPICQIO | SPICDIO | SPICQOUT | SPICDOUT | SPICAHB | SPICFASTRD))
+        | (SPICRESANDRES | SPICSHARE | SPICWPR | SPIC2BSE);
+  
+  _spi0_command(spi0c,flags,spi0u1,spi0u2,data,((data_bits/32)+1)*4,((read_bits/32)+1)*4);
 
   // clear any bits we did not read in the last word.
   if (read_bits % 32) {
