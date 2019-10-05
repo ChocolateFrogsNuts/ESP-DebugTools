@@ -14,10 +14,9 @@
 
 /* SPI0_COMMAND_FULLVER
  * Defined:     full generic version for up to 512 bits of data in/out.
- * Not Defined: cut down version with max 32 bits of data in/out and no
- *              parameter checking.
+ * Not Defined: cut down version with max 32 bits of data in/out.
  */
-#define SPI0_COMMAND_FULLVER
+//#define SPI0_COMMAND_FULLVER
 
 #define memw() asm("memw");
 extern "C" int Wait_SPI_Idle(SpiFlashChip *fc);
@@ -69,6 +68,7 @@ uint32_t SPI_read_(uint32_t addr, uint8_t *dst, uint32_t len) {
   return SPI_FLASH_RESULT_OK;
 }
 
+#if 0
 ICACHE_RAM_ATTR 
 void inline spi0_setDataLengths(uint8_t mosi_bits, uint8_t miso_bits) {
   #ifdef ESP32
@@ -86,31 +86,34 @@ void inline spi0_setDataLengths(uint8_t mosi_bits, uint8_t miso_bits) {
     SPI0U1 = (miso_bits << SPILMISO) | (mosi_bits << SPILMOSI);
   #endif
 }
-
-/* spi0_command: send a custom SPI command. */
-ICACHE_RAM_ATTR 
-int spi0_command(uint8_t cmd, uint32_t *data, uint32_t data_bits, uint32_t read_bits) {
-#ifdef SPI0_COMMAND_FULLVER
-  if (data_bits>(64*8)) return 1;
-  if (read_bits>(64*8)) return 1;
 #endif
 
-  Wait_SPI_Idle(flashchip);
-  
+uint32_t calc_spi0u1(uint8_t mosi_bits, uint8_t miso_bits) {
+ if (mosi_bits!=0) mosi_bits--;
+ if (miso_bits!=0) miso_bits--;
+ return ((miso_bits&SPIMMISO) << SPILMISO) | ((mosi_bits&SPIMMOSI) << SPILMOSI);
+}
+
+/*
+ * critical part of spi0_command that must be IRAM_ATTR
+ * Approx 160 bytes for cut down (32bit max) version.
+ */
+IRAM_ATTR
+void // __attribute__((aligned(256)))
+_spi0_command(uint32_t spi0c,uint32_t flags,uint32_t spi0u1,uint32_t spi0u2,
+              uint32_t *data,uint32_t data_bits,uint32_t read_bits)
+{
   uint32_t old_spi_usr = SPI0U;
   uint32_t old_spi_usr2= SPI0U2;
   uint32_t old_spi_c   = SPI0C;
 
   //SPI0S &= ~(SPISE|SPISBE|SPISSE|SPISCD);
- 
-  uint32_t flags=SPIUCOMMAND; //SPI_USR_COMMAND
-  if (read_bits>0) flags |= SPIUMISO; // SPI_USR_MISO
-  if (data_bits>0) flags |= SPIUMOSI; // SPI_USR_MOSI
-  spi0_setDataLengths(data_bits, read_bits);
-  SPI0C = (SPI0C & ~(SPICQIO | SPICDIO | SPICQOUT | SPICDOUT | SPICAHB | SPICFASTRD))
-        | (SPICRESANDRES | SPICSHARE | SPICWPR | SPIC2BSE);
+  
+  //spi0_setDataLengths(data_bits, read_bits);
+  SPI0C = spi0c;
   SPI0U = flags;
-  SPI0U2= ((7 & SPIMCOMMAND)<<SPILCOMMAND) | cmd;
+  SPI0U1= spi0u1;
+  SPI0U2= spi0u2;
 
   // copy the outgoing data to the SPI hardware
   if (data_bits>0) {
@@ -136,10 +139,6 @@ int spi0_command(uint8_t cmd, uint32_t *data, uint32_t data_bits, uint32_t read_
       uint32_t *dst=data;
       for (uint32_t i=0; i<=(read_bits/32); i++) *dst++=*src++;
       // zero any unread bits in the last word
-      if (read_bits % 32) {
-         dst--;
-         *dst &= ~(0xFFFFFFFF << (read_bits % 32));       
-      }
     #else
       *data=SPI0W0;
     #endif
@@ -148,6 +147,38 @@ int spi0_command(uint8_t cmd, uint32_t *data, uint32_t data_bits, uint32_t read_
   SPI0U = old_spi_usr;
   SPI0U2= old_spi_usr2;
   SPI0C = old_spi_c;
+}
+
+/*  spi0_command: send a custom SPI command.
+ *  This part calculates register values and does not need to be IRAM_ATTR
+ */
+int spi0_command(uint8_t cmd, uint32_t *data, uint32_t data_bits, uint32_t read_bits) {
+#ifdef SPI0_COMMAND_FULLVER
+  if (data_bits>(64*8)) return 1;
+  if (read_bits>(64*8)) return 1;
+#else
+  if (data_bits>(4*8)) return 1;
+  if (read_bits>(4*8)) return 1;
+#endif
+
+  Wait_SPI_Idle(flashchip);
+
+  uint32_t flags=SPIUCOMMAND; //SPI_USR_COMMAND
+  if (read_bits>0) flags |= SPIUMISO; // SPI_USR_MISO
+  if (data_bits>0) flags |= SPIUMOSI; // SPI_USR_MOSI
+
+  uint32_t spi0c = (SPI0C & ~(SPICQIO | SPICDIO | SPICQOUT | SPICDOUT | SPICAHB | SPICFASTRD))
+        | (SPICRESANDRES | SPICSHARE | SPICWPR | SPIC2BSE);
+  
+  uint32_t spi0u2 = ((7 & SPIMCOMMAND)<<SPILCOMMAND) | cmd;
+  uint32_t spi0u1 = calc_spi0u1(data_bits, read_bits);
+  
+  _spi0_command(spi0c,flags,spi0u1,spi0u2,data,data_bits,read_bits);
+
+  // clear any bits we did not read in the last word.
+  if (read_bits % 32) {
+     data[read_bits/32] &= ~(0xFFFFFFFF << (read_bits % 32));
+  }
   return 0;
 }
 
