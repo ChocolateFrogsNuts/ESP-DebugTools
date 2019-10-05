@@ -96,12 +96,13 @@ uint32_t calc_spi0u1(uint8_t mosi_bits, uint8_t miso_bits) {
 
 /*
  * critical part of spi0_command that must be IRAM_ATTR
- * Approx 190 bytes for cut down (32bit max) version.
+ * Approx 196 bytes for cut down (32bit max) version.
+ *        212 bytes for full (512bit max) version
  */
 IRAM_ATTR
 void //__attribute__((aligned(256)))
 _spi0_command(uint32_t spi0c,uint32_t flags,uint32_t spi0u1,uint32_t spi0u2,
-              uint32_t *data,uint32_t data_words,uint32_t read_words)
+              uint32_t *data,uint32_t data_bytes,uint32_t read_bytes)
 {
   Wait_SPI_Idle(flashchip);
   uint32_t old_spi_usr = SPI0U;
@@ -115,9 +116,9 @@ _spi0_command(uint32_t spi0c,uint32_t flags,uint32_t spi0u1,uint32_t spi0u2,
   SPI0U2= spi0u2;
 
   // copy the outgoing data to the SPI hardware
-  if (data_words>0) {
+  if (data_bytes>0) {
      #ifdef SPI0_COMMAND_FULLVER
-       memcpy((void*)&(SPI0W0),data,data_words);
+       memcpy((void*)&(SPI0W0),data,data_bytes);
      #else
        SPI0W0=*data;
      #endif
@@ -129,10 +130,10 @@ _spi0_command(uint32_t spi0c,uint32_t flags,uint32_t spi0u1,uint32_t spi0u2,
   // wait for the command to complete
   while (SPI0CMD & SPICMDUSR) {}
 
-  if (read_words>0) {
+  if (read_bytes>0) {
      // copy the response back to the buffer
      #ifdef SPI0_COMMAND_FULLVER
-       memcpy(data,(void *)&(SPI0W0),read_words);
+       memcpy(data,(void *)&(SPI0W0),read_bytes);
      #else
        *data=SPI0W0;
      #endif
