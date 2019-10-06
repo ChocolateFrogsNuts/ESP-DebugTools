@@ -88,7 +88,7 @@ void inline spi0_setDataLengths(uint8_t mosi_bits, uint8_t miso_bits) {
 }
 #endif
 
-uint32_t calc_spi0u1(uint8_t mosi_bits, uint8_t miso_bits) {
+static inline uint32_t calc_u1(uint32_t mosi_bits, uint32_t miso_bits) {
  if (mosi_bits!=0) mosi_bits--;
  if (miso_bits!=0) miso_bits--;
  return ((miso_bits&SPIMMISO) << SPILMISO) | ((mosi_bits&SPIMMOSI) << SPILMOSI);
@@ -156,17 +156,22 @@ int spi0_command(uint8_t cmd, uint32_t *data, uint32_t data_bits, uint32_t read_
   if (read_bits>(4*8)) return 1;
 #endif
 
+  uint32_t data_words=data_bits/32;
+  uint32_t read_words=read_bits/32;
+  if (data_bits % 32 != 0) data_words++;
+  if (read_bits % 32 != 0) read_words++;
+
   uint32_t flags=SPIUCOMMAND; //SPI_USR_COMMAND
   if (read_bits>0) flags |= SPIUMISO; // SPI_USR_MISO
   if (data_bits>0) flags |= SPIUMOSI; // SPI_USR_MOSI
 
   uint32_t spi0u2 = ((7 & SPIMCOMMAND)<<SPILCOMMAND) | cmd;
-  uint32_t spi0u1 = calc_spi0u1(data_bits, read_bits);
+  uint32_t spi0u1 = calc_u1(data_bits, read_bits);
   
   uint32_t spi0c = (SPI0C & ~(SPICQIO | SPICDIO | SPICQOUT | SPICDOUT | SPICAHB | SPICFASTRD))
         | (SPICRESANDRES | SPICSHARE | SPICWPR | SPIC2BSE);
   
-  _spi0_command(spi0c,flags,spi0u1,spi0u2,data,((data_bits/32)+1)*4,((read_bits/32)+1)*4);
+  _spi0_command(spi0c,flags,spi0u1,spi0u2,data,data_words*4,read_words*4);
 
   // clear any bits we did not read in the last word.
   if (read_bits % 32) {
@@ -216,7 +221,7 @@ void flash_xmc_check() {
      #endif
 
      // test assorted flash access functions
-     uint32_t cfg=0;
+     uint32_t cfg;
      cfg=0;
      if (spi_flash_read(0x0000, &cfg, 4) != SPI_FLASH_RESULT_OK) {
         Serial.print("spi_flash_read failed\n");
@@ -234,7 +239,34 @@ void flash_xmc_check() {
         Serial.print("spi0_command: read flash failed\n");
      }
      Serial.printf("spi0_command: first 4 bytes of flash=%08x\n",cfg);
-     
+
+     uint32_t faddr = 16;
+     uint8_t fdata[64];
+     memset(fdata,0,sizeof(fdata));
+     if (spi_flash_read(16, (uint32_t*)fdata, sizeof(fdata))!=SPI_FLASH_RESULT_OK) {
+        Serial.print("spi0_command: read flash failed\n");
+     }
+     Serial.printf("spi_flash_read: bytes %d - %d of flash:", faddr, faddr+sizeof(fdata));
+     for (unsigned int i=0; i<sizeof(fdata); i++) {
+         if (i % 16 == 0) Serial.print("\n");
+         Serial.printf("%02x ",fdata[i]);
+     }
+     Serial.print("\n");
+
+     memset(fdata,0,sizeof(fdata));
+     fdata[2]=faddr & 0xFF; // address needs to be big-endian, 24-bit
+     fdata[1]=(faddr>>8) & 0xFF;
+     fdata[0]=(faddr>>16) & 0xFF;
+     if (spi0_command(0x03, (uint32_t*)fdata, 24, sizeof(fdata)*8)) { // 0x03 = Read Data
+        Serial.print("spi0_command: read flash failed\n");
+     }
+     Serial.printf("spi0_command: bytes %d - %d of flash:", faddr, faddr+sizeof(fdata));
+     for (unsigned int i=0; i<sizeof(fdata); i++) {
+         if (i % 16 == 0) Serial.print("\n");
+         Serial.printf("%02x ",fdata[i]);
+     }
+     Serial.print("\n");
+
      uint32_t SR=0, SR1=0,SR2=0,SR3, newSR3;
      #if 0
      Serial.print("SPI_Read SR\n");
