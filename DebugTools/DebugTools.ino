@@ -50,13 +50,16 @@ void custom_crash_callback(struct rst_info *rst_info, uint32_t stack, uint32_t s
   // dump the ROM mem_malloc stats
   //Serial.printf("Free Heap: %u\n\n", system_get_free_heap_size());
 
+  if (rst_info->epc1)
+     Serial.printf("*epc1 == %08x\n", *((uint32_t *)(rst_info->epc1)));
+
   Serial.printf("I lived for %ld minutes!\n", millis()/(60*1000));
   #if WIFI_PROMISC || PHY_CAPTURE
   phy_stats();
   #endif
   
   //WiFi.printDiag(Serial);
-  WiFi.disconnect();    // try to be stabe enough to dump data
+  WiFi.disconnect();    // try to be stable enough to dump data
 
   #if INTR_LOCK_TEST
      print_intr_lock_stats();
@@ -119,6 +122,10 @@ void setup() {
   #if WITH_GDB_STUB
   gdbstub_init();
   #endif
+
+  #if WITH_IRAMTEST
+  iram_test();
+  #endif
   
   Serial.printf("FLASH_SIZE_MAP=%d\n", system_get_flash_size_map());
 
@@ -157,7 +164,7 @@ void setup() {
   //delay(100);
 
   WiFi.persistent(false);
-  WiFi.setOutputPower(20.5); // 0-20.5, 17.75 max ok
+  WiFi.setOutputPower(20.5); // 0-20.5
   WiFi.setSleepMode(SLEEP_MODE, 0);  // NONE/MODEM/LIGHT, 0-10 (interval is SDK3 only)
   
   #if WIFI_PROMISC==0

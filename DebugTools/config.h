@@ -36,6 +36,8 @@
 
 #define FLASH_SPEEDTEST 1
 
+#define WITH_IRAMTEST 0
+
 #define WITH_MEMTEST 0
 
 // include /initialize the GDB stub for debugging
@@ -70,6 +72,18 @@ extern "C" void init_states();
 #if PHY_CAPTURE
 extern "C" void phy_stats();
 extern "C" void phy_capture_init();
+#endif
+
+#if INTR_LOCK_TEST
+extern "C" void print_test_counters();
+#endif
+
+#if WITH_IRAM_TEST
+extern "C" void iram_test();
+#endif
+
+#if FLASH_SPEEDTEST
+extern "C" void flash_speed_test();
 #endif
 
 #endif // _CONFIG_H_
