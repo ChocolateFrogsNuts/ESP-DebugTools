@@ -102,10 +102,14 @@ static inline uint32_t calc_u1(uint32_t mosi_bits, uint32_t miso_bits) {
  *  All preloads are word aligned.
  */
 void precache(void *f, uint32_t bytes) {
+  // Size of a cache page in words. We only need to read one word per
+  // page (ie 1 word in 8) for this to work.
+  #define CACHE_PAGE_SIZE (32/4)
+  
   register uint32_t a0 asm("a0");
   uint32_t *p = (uint32_t*)((f ? (uint32_t)f : a0) & ~0x03);
   volatile uint32_t x;
-  for (uint32_t i=0; i<=(bytes/4); i++, p++) x=*p++;
+  for (uint32_t i=0; i<=(bytes/4); i+=CACHE_PAGE_SIZE, p+=CACHE_PAGE_SIZE) x=*p;
   (void)x;
 }
 
