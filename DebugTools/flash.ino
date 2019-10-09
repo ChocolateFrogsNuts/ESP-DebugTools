@@ -113,18 +113,28 @@ void precache(void *f, uint32_t bytes) {
   (void)x;
 }
 
+#define PRECACHE_ATTR __attribute__((optimize("no-reorder-blocks")))
+
+#define PRECACHE_START(tag) \
+    precache(NULL,(uint8_t *)&&_precache_end_##tag - (uint8_t*)&&_precache_start_##tag); \
+    _precache_start_##tag:
+
+#define PRECACHE_END(tag) \
+    _precache_end_##tag:
+
 /*
  * critical part of spi0_command.
  * Approx 196 bytes for cut down (32bit max) version.
  *        212 bytes for full (512bit max) version
  * Kept in a separate function to prevent compiler spreading the code around too much.
- * precache() saves having to make the function IRAM_ATTR.
+ * PRECACHE_* saves having to make the function IRAM_ATTR.
  */
-void _spi0_command(uint32_t spi0c,uint32_t flags,uint32_t spi0u1,uint32_t spi0u2,
+void PRECACHE_ATTR
+_spi0_command(uint32_t spi0c,uint32_t flags,uint32_t spi0u1,uint32_t spi0u2,
                    uint32_t *data,uint32_t data_bytes,uint32_t read_bytes)
-{  
-  //precache((void*)_spi0_command,256);
-  precache(NULL, 256);
+{ 
+  PRECACHE_START();
+
   Wait_SPI_Idle(flashchip);
   uint32_t old_spi_usr = SPI0U;
   uint32_t old_spi_usr2= SPI0U2;
@@ -163,6 +173,8 @@ void _spi0_command(uint32_t spi0c,uint32_t flags,uint32_t spi0u1,uint32_t spi0u2
   SPI0U = old_spi_usr;
   SPI0U2= old_spi_usr2;
   SPI0C = old_spi_c;
+  
+  PRECACHE_END();
 }
 
 /*  spi0_command: send a custom SPI command.
