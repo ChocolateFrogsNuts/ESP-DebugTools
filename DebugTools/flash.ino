@@ -12,12 +12,6 @@
  * as well as a couple of extra funcs for sending user-defined SPI flash commands.
  */
 
-/* SPI0_COMMAND_FULLVER
- * Defined:     full generic version for up to 512 bits of data in/out.
- * Not Defined: cut down version with max 32 bits of data in/out.
- */
-#define SPI0_COMMAND_FULLVER
-
 #define memw() asm("memw");
 extern "C" int Wait_SPI_Idle(SpiFlashChip *fc);
 
@@ -146,13 +140,9 @@ _spi0_command(uint32_t spi0c,uint32_t flags,uint32_t spi0u1,uint32_t spi0u2,
   SPI0U1= spi0u1;
   SPI0U2= spi0u2;
 
-  // copy the outgoing data to the SPI hardware
   if (data_bytes>0) {
-     #ifdef SPI0_COMMAND_FULLVER
-       memcpy((void*)&(SPI0W0),data,data_bytes);
-     #else
-       SPI0W0=*data;
-     #endif
+     // copy the outgoing data to the SPI hardware
+     memcpy((void*)&(SPI0W0),data,data_bytes);
   }
 
   // Start the transfer
@@ -163,11 +153,7 @@ _spi0_command(uint32_t spi0c,uint32_t flags,uint32_t spi0u1,uint32_t spi0u2,
 
   if (read_bytes>0) {
      // copy the response back to the buffer
-     #ifdef SPI0_COMMAND_FULLVER
-       memcpy(data,(void *)&(SPI0W0),read_bytes);
-     #else
-       *data=SPI0W0;
-     #endif
+     memcpy(data,(void *)&(SPI0W0),read_bytes);
   }
 
   SPI0U = old_spi_usr;
