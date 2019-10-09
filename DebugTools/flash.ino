@@ -101,8 +101,8 @@ void precache(void *f, uint32_t bytes) {
   #define CACHE_PAGE_SIZE (32/4)
   
   register uint32_t a0 asm("a0");
-  uint32_t *p = (uint32_t*)((f ? (uint32_t)f : a0) & ~0x03);
-  volatile uint32_t x;
+  volatile uint32_t *p = (uint32_t*)((f ? (uint32_t)f : a0) & ~0x03);
+  uint32_t x;
   for (uint32_t i=0; i<=(bytes/4); i+=CACHE_PAGE_SIZE, p+=CACHE_PAGE_SIZE) x=*p;
   (void)x;
 }
@@ -167,13 +167,8 @@ _spi0_command(uint32_t spi0c,uint32_t flags,uint32_t spi0u1,uint32_t spi0u2,
  *  This part calculates register values and does not need to be IRAM_ATTR
  */
 int spi0_command(uint8_t cmd, uint32_t *data, uint32_t data_bits, uint32_t read_bits) {
-#ifdef SPI0_COMMAND_FULLVER
   if (data_bits>(64*8)) return 1;
   if (read_bits>(64*8)) return 1;
-#else
-  if (data_bits>(4*8)) return 1;
-  if (read_bits>(4*8)) return 1;
-#endif
   
   uint32_t data_words=data_bits/32;
   uint32_t read_words=read_bits/32;
