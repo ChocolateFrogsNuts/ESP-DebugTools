@@ -94,16 +94,33 @@ static inline uint32_t calc_u1(uint32_t mosi_bits, uint32_t miso_bits) {
  return ((miso_bits&SPIMMISO) << SPILMISO) | ((mosi_bits&SPIMMOSI) << SPILMOSI);
 }
 
+
+/* precache()
+ *  pre-loads flash data into the flash cache
+ *  if f==0, preloads instructions starting at the address we were called from.
+ *  otherwise preloads flash at the given address.
+ *  All preloads are word aligned.
+ */
+void precache(void *f, uint32_t bytes) {
+  register uint32_t a0 asm("a0");
+  uint32_t *p = (uint32_t*)((f ? (uint32_t)f : a0) & ~0x03);
+  volatile uint32_t x;
+  for (uint32_t i=0; i<=(bytes/4); i++, p++) x=*p++;
+  (void)x;
+}
+
 /*
- * critical part of spi0_command that must be IRAM_ATTR
+ * critical part of spi0_command.
  * Approx 196 bytes for cut down (32bit max) version.
  *        212 bytes for full (512bit max) version
+ * Kept in a separate function to prevent compiler spreading the code around too much.
+ * precache() saves having to make the function IRAM_ATTR.
  */
-IRAM_ATTR
-void //__attribute__((aligned(256)))
-_spi0_command(uint32_t spi0c,uint32_t flags,uint32_t spi0u1,uint32_t spi0u2,
-              uint32_t *data,uint32_t data_bytes,uint32_t read_bytes)
-{
+void _spi0_command(uint32_t spi0c,uint32_t flags,uint32_t spi0u1,uint32_t spi0u2,
+                   uint32_t *data,uint32_t data_bytes,uint32_t read_bytes)
+{  
+  //precache((void*)_spi0_command,256);
+  precache(NULL, 256);
   Wait_SPI_Idle(flashchip);
   uint32_t old_spi_usr = SPI0U;
   uint32_t old_spi_usr2= SPI0U2;
@@ -155,7 +172,7 @@ int spi0_command(uint8_t cmd, uint32_t *data, uint32_t data_bits, uint32_t read_
   if (data_bits>(4*8)) return 1;
   if (read_bits>(4*8)) return 1;
 #endif
-
+  
   uint32_t data_words=data_bits/32;
   uint32_t read_words=read_bits/32;
   if (data_bits % 32 != 0) data_words++;
@@ -172,7 +189,7 @@ int spi0_command(uint8_t cmd, uint32_t *data, uint32_t data_bits, uint32_t read_
         | (SPICRESANDRES | SPICSHARE | SPICWPR | SPIC2BSE);
   
   _spi0_command(spi0c,flags,spi0u1,spi0u2,data,data_words*4,read_words*4);
-
+  
   // clear any bits we did not read in the last word.
   if (read_bits % 32) {
      data[read_bits/32] &= ~(0xFFFFFFFF << (read_bits % 32));
