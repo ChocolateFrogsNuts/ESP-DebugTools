@@ -133,28 +133,30 @@ static inline uint32_t calc_u1(uint32_t mosi_bits, uint32_t miso_bits) {
  * PRECACHE_* saves having to make the function IRAM_ATTR.
  */
 int PRECACHE_ATTR
-_spi_command(volatile uint32_t spinum,
+_spi_command(volatile uint32_t spiIfNum,
              uint32_t spic,uint32_t spiu,uint32_t spiu1,uint32_t spiu2,
              uint32_t *data,uint32_t write_words,uint32_t read_words)
 { 
+  if (spiIfNum>1) return SPI_RESULT_ERR;
+
   // force SPI register access via base+offest. 
   // Prevents loading individual address constants from flash.
-  uint32_t spibase = (uint32_t)(spinum ? &(SPI1CMD) : &(SPI0CMD));
+  uint32_t *spibase = (uint32_t*)(spiIfNum ? &(SPI1CMD) : &(SPI0CMD));
   #define SPIREG(reg) *((volatile uint32_t *)(spibase+(&(reg) - &(SPI0CMD))))
 
   // preload any constants and functions we need into variables
   // Everything must be volatile or the optimizer can treat them as 
   // constants, resulting in the flash reads we're trying to avoid
-  void *(* volatile memcpyp)(void *dest,const void *src, size_t n) = memcpy;
-  int   (* volatile Wait_SPI_Idlep)(SpiFlashChip *fc) = Wait_SPI_Idle;
+  void *(* volatile memcpyp)(void *,const void *, size_t) = memcpy;
+  int   (* volatile Wait_SPI_Idlep)(SpiFlashChip *) = Wait_SPI_Idle;
   volatile SpiFlashChip *fchip=flashchip;
   volatile uint32_t spicmdusr=SPICMDUSR;
 
-  PRECACHE_START();
-
-  // As this happens before we start the real work, we can get away with
-  // not holding the func address in ram.
-  Wait_SPI_Idlep((SpiFlashChip *)fchip);
+  if (!spiIfNum) {
+     // Only need to precache when using SPI0
+     PRECACHE_START();
+     Wait_SPI_Idlep((SpiFlashChip *)fchip);
+  }
   
   uint32_t old_spi_usr = SPIREG(SPI0U);
   uint32_t old_spi_usr2= SPIREG(SPI0U2);
