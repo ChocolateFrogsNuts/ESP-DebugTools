@@ -82,13 +82,7 @@ void inline spi0_setDataLengths(uint8_t mosi_bits, uint8_t miso_bits) {
 }
 #endif
 
-static inline uint32_t calc_u1(uint32_t mosi_bits, uint32_t miso_bits) {
- if (mosi_bits!=0) mosi_bits--;
- if (miso_bits!=0) miso_bits--;
- return ((miso_bits&SPIMMISO) << SPILMISO) | ((mosi_bits&SPIMMOSI) << SPILMOSI);
-}
-
-
+#if 0 // MY_PRECACHE
 /* precache()
  *  pre-loads flash data into the flash cache
  *  if f==0, preloads instructions starting at the address we were called from.
@@ -116,6 +110,21 @@ void precache(void *f, uint32_t bytes) {
 #define PRECACHE_END(tag) \
     _precache_end_##tag:
 
+#else
+#include "core_esp8266_features.h"
+#endif // MY_PRECACHE
+
+#if 1 // MY_SPI0_COMMAND
+static inline uint32_t calc_u1(uint32_t mosi_bits, uint32_t miso_bits) {
+ if (mosi_bits!=0) mosi_bits--;
+ if (miso_bits!=0) miso_bits--;
+ return ((miso_bits&SPIMMISO) << SPILMISO) | ((mosi_bits&SPIMMOSI) << SPILMOSI);
+}
+
+#define SPI_RESULT_OK  0
+#define SPI_RESULT_ERR 1
+#define SPI_RESULT_TIMEOUT 2
+
 /*
  * critical part of spi0_command.
  * Approx 196 bytes for cut down (32bit max) version.
@@ -123,52 +132,71 @@ void precache(void *f, uint32_t bytes) {
  * Kept in a separate function to prevent compiler spreading the code around too much.
  * PRECACHE_* saves having to make the function IRAM_ATTR.
  */
-void PRECACHE_ATTR
-_spi0_command(uint32_t spi0c,uint32_t flags,uint32_t spi0u1,uint32_t spi0u2,
-                   uint32_t *data,uint32_t data_bytes,uint32_t read_bytes)
+int PRECACHE_ATTR
+_spi_command(volatile uint32_t spinum,
+             uint32_t spic,uint32_t spiu,uint32_t spiu1,uint32_t spiu2,
+             uint32_t *data,uint32_t write_words,uint32_t read_words)
 { 
+  // force SPI register access via base+offest. 
+  // Prevents loading individual address constants from flash.
+  uint32_t spibase = (uint32_t)(spinum ? &(SPI1CMD) : &(SPI0CMD));
+  #define SPIREG(reg) *((volatile uint32_t *)(spibase+(&(reg) - &(SPI0CMD))))
+
+  // preload any constants and functions we need into variables
+  // Everything must be volatile or the optimizer can treat them as 
+  // constants, resulting in the flash reads we're trying to avoid
+  void *(* volatile memcpyp)(void *dest,const void *src, size_t n) = memcpy;
+  int   (* volatile Wait_SPI_Idlep)(SpiFlashChip *fc) = Wait_SPI_Idle;
+  volatile SpiFlashChip *fchip=flashchip;
+  volatile uint32_t spicmdusr=SPICMDUSR;
+
   PRECACHE_START();
 
-  Wait_SPI_Idle(flashchip);
-  uint32_t old_spi_usr = SPI0U;
-  uint32_t old_spi_usr2= SPI0U2;
-  uint32_t old_spi_c   = SPI0C;
+  // As this happens before we start the real work, we can get away with
+  // not holding the func address in ram.
+  Wait_SPI_Idlep((SpiFlashChip *)fchip);
+  
+  uint32_t old_spi_usr = SPIREG(SPI0U);
+  uint32_t old_spi_usr2= SPIREG(SPI0U2);
+  uint32_t old_spi_c   = SPIREG(SPI0C);
 
   //SPI0S &= ~(SPISE|SPISBE|SPISSE|SPISCD);
-  SPI0C = spi0c;
-  SPI0U = flags;
-  SPI0U1= spi0u1;
-  SPI0U2= spi0u2;
+  SPIREG(SPI0C) = spic;
+  SPIREG(SPI0U) = spiu;
+  SPIREG(SPI0U1)= spiu1;
+  SPIREG(SPI0U2)= spiu2;
 
-  if (data_bytes>0) {
+  if (write_words>0) {
      // copy the outgoing data to the SPI hardware
-     memcpy((void*)&(SPI0W0),data,data_bytes);
+     memcpyp((void*)&(SPIREG(SPI0W0)),data,write_words*4);
   }
 
   // Start the transfer
-  SPI0CMD = SPICMDUSR;
+  SPIREG(SPI0CMD) = spicmdusr;
 
   // wait for the command to complete
-  while (SPI0CMD & SPICMDUSR) {}
+  uint32_t timeout = 1000;
+  while ((SPIREG(SPI0CMD) & spicmdusr) && timeout--) {}
 
-  if (read_bytes>0) {
+  if ((read_words>0) && (timeout>0)) {
      // copy the response back to the buffer
-     memcpy(data,(void *)&(SPI0W0),read_bytes);
+     memcpyp(data,(void *)&(SPIREG(SPI0W0)),read_words*4);
   }
 
-  SPI0U = old_spi_usr;
-  SPI0U2= old_spi_usr2;
-  SPI0C = old_spi_c;
+  SPIREG(SPI0U) = old_spi_usr;
+  SPIREG(SPI0U2)= old_spi_usr2;
+  SPIREG(SPI0C) = old_spi_c;
   
   PRECACHE_END();
+  return (timeout>0 ? SPI_RESULT_OK : SPI_RESULT_TIMEOUT);
 }
 
 /*  spi0_command: send a custom SPI command.
  *  This part calculates register values and does not need to be IRAM_ATTR
  */
 int spi0_command(uint8_t cmd, uint32_t *data, uint32_t data_bits, uint32_t read_bits) {
-  if (data_bits>(64*8)) return 1;
-  if (read_bits>(64*8)) return 1;
+  if (data_bits>(64*8)) return SPI_RESULT_ERR;
+  if (read_bits>(64*8)) return SPI_RESULT_ERR;
   
   uint32_t data_words=data_bits/32;
   uint32_t read_words=read_bits/32;
@@ -185,14 +213,21 @@ int spi0_command(uint8_t cmd, uint32_t *data, uint32_t data_bits, uint32_t read_
   uint32_t spi0c = (SPI0C & ~(SPICQIO | SPICDIO | SPICQOUT | SPICDOUT | SPICAHB | SPICFASTRD))
         | (SPICRESANDRES | SPICSHARE | SPICWPR | SPIC2BSE);
   
-  _spi0_command(spi0c,flags,spi0u1,spi0u2,data,data_words*4,read_words*4);
+  int rc = _spi_command(0,spi0c,flags,spi0u1,spi0u2,data,data_words,read_words);
   
   // clear any bits we did not read in the last word.
-  if (read_bits % 32) {
-     data[read_bits/32] &= ~(0xFFFFFFFF << (read_bits % 32));
+  if (rc==SPI_RESULT_OK) {
+     if (read_bits % 32) {
+        data[read_bits/32] &= ~(0xFFFFFFFF << (read_bits % 32));
+     }
   }
-  return 0;
+  return rc;
 }
+
+#else
+#include "spi_utils.h"
+#define spi0_command SPI0Command
+#endif // MY_SPI0_COMMAND
 
 // ROM functions not in user_interface.h
 extern "C" void SelectSpiFunction();
@@ -249,7 +284,7 @@ void flash_xmc_check() {
      Serial.printf("SPI_read_: first 4 bytes of flash=%08x\n",cfg);
      
      cfg=0;
-     if (spi0_command(0x03, &cfg, 24, 32)) { // 0x03 = Read Data
+     if (spi0_command(0x03, &cfg, 24, 32)!=SPI_RESULT_OK) { // 0x03 = Read Data
         Serial.print("spi0_command: read flash failed\n");
      }
      Serial.printf("spi0_command: first 4 bytes of flash=%08x\n",cfg);
@@ -271,7 +306,7 @@ void flash_xmc_check() {
      fdata[2]=faddr & 0xFF; // address needs to be big-endian, 24-bit
      fdata[1]=(faddr>>8) & 0xFF;
      fdata[0]=(faddr>>16) & 0xFF;
-     if (spi0_command(0x03, (uint32_t*)fdata, 24, sizeof(fdata)*8)) { // 0x03 = Read Data
+     if (spi0_command(0x03, (uint32_t*)fdata, 24, sizeof(fdata)*8)!=SPI_RESULT_OK) { // 0x03 = Read Data
         Serial.print("spi0_command: read flash failed\n");
      }
      Serial.printf("spi0_command: bytes %d - %d of flash:", faddr, faddr+sizeof(fdata));
@@ -295,17 +330,17 @@ void flash_xmc_check() {
      Serial.printf("SPI_read_status_ SR=%08x\n", SR);
 
      Serial.print("Read SR1\n");
-     if (spi0_command(SPI_FLASH_RSR1, &SR1, 0, 8)) {
+     if (spi0_command(SPI_FLASH_RSR1, &SR1, 0, 8)!=SPI_RESULT_OK) {
         Serial.printf("spi0_command(read SR1) failed\n");
      }
      Serial.print("Read SR2\n");
-     if (spi0_command(SPI_FLASH_RSR2, &SR2, 0, 8)) {
+     if (spi0_command(SPI_FLASH_RSR2, &SR2, 0, 8)!=SPI_RESULT_OK) {
         Serial.printf("spi0_command(read SR2) failed\n");
      }
      #endif
      
      Serial.print("Read SR3\n");
-     if (spi0_command(SPI_FLASH_RSR3, &SR3, 0, 8)) {
+     if (spi0_command(SPI_FLASH_RSR3, &SR3, 0, 8)!=SPI_RESULT_OK) {
         Serial.printf("spi0_command(read SR3) failed\n");
      }
      
@@ -334,19 +369,19 @@ void flash_xmc_check() {
      if (newSR3 != SR3) {
         #if 1
           Serial.print("WEVSR\n");
-          if (spi0_command(SPI_FLASH_WEVSR,NULL,0,0)) {
+          if (spi0_command(SPI_FLASH_WEVSR,NULL,0,0)!=SPI_RESULT_OK) {
              Serial.print("spi0_command(write volatile enable) failed\n");
           }
           Serial.print("WSR3\n");
-          if (spi0_command(SPI_FLASH_WSR3,&newSR3,8,0)) {
+          if (spi0_command(SPI_FLASH_WSR3,&newSR3,8,0)!=SPI_RESULT_OK) {
              Serial.print("spi0_command(write SR3) failed\n");
           }
           Serial.print("WRDI\n");
-          if (spi0_command(SPI_FLASH_WRDI,NULL,0,0)) {
+          if (spi0_command(SPI_FLASH_WRDI,NULL,0,0)!=SPI_RESULT_OK) {
              Serial.print("spi0_command(write disable) failed\n");
           }
           Serial.print("RSR3\n");
-          if (spi0_command(SPI_FLASH_RSR3, &SR3, 0, 8)) {
+          if (spi0_command(SPI_FLASH_RSR3, &SR3, 0, 8)!=SPI_RESULT_OK) {
              Serial.printf("spi0_command(re-read SR3) failed\n");
           }
         #else
@@ -366,22 +401,25 @@ void flash_xmc_check() {
 }
 
 
-// Minimal version for startup code
-void flash_xmc_check2() {
-  if (ESP.getFlashChipVendorId() == SPI_FLASH_VENDOR_XMC) {
-     uint32_t SR3, newSR3;
-     if (!spi0_command(SPI_FLASH_RSR3, &SR3, 0, 8)) { // read SR3
-        newSR3=SR3;
-        if (ESP.getFlashChipSpeed()>26000000) { // >26Mhz?
-           newSR3 &= ~(SPI_FLASH_XMC_DRV_MASK << SPI_FLASH_XMC_DRV_S);
-           newSR3 |= (SPI_FLASH_XMC_DRV_100 << SPI_FLASH_XMC_DRV_S);
-        }
-        if (newSR3 != SR3) { // only write if changed
-           if (!spi0_command(SPI_FLASH_WEVSR,NULL,0,0))  // write enable volatile SR
-              spi0_command(SPI_FLASH_WSR3,&newSR3,8,0);  // write to SR3
-           spi0_command(SPI_FLASH_WRDI,NULL,0,0);        // write disable - probably not needed
-        }
-     }
+/* flash_init_quirks()
+ * Do any chip-specific initialization to improve performance.
+ */
+void flash_init_quirks() {
+  switch (ESP.getFlashChipVendorId()) {
+    case SPI_FLASH_VENDOR_XMC:
+         uint32_t SR3, newSR3;
+         if (spi0_command(SPI_FLASH_RSR3, &SR3, 0, 8)==SPI_RESULT_OK) { // read SR3
+            newSR3=SR3;
+            if (ESP.getFlashChipSpeed()>26000000) { // >26Mhz?
+               newSR3 &= ~(SPI_FLASH_XMC_DRV_MASK << SPI_FLASH_XMC_DRV_S);
+               newSR3 |= (SPI_FLASH_XMC_DRV_100 << SPI_FLASH_XMC_DRV_S);
+            }
+            if (newSR3 != SR3) { // only write if changed
+               if (spi0_command(SPI_FLASH_WEVSR,NULL,0,0)==SPI_RESULT_OK)  // write enable volatile SR
+                  spi0_command(SPI_FLASH_WSR3,&newSR3,8,0);  // write to SR3
+               spi0_command(SPI_FLASH_WRDI,NULL,0,0);        // write disable - probably not needed
+            }
+         }
   }
 }
 
