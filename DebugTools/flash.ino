@@ -114,16 +114,22 @@ void precache(void *f, uint32_t bytes) {
 #include "core_esp8266_features.h"
 #endif // MY_PRECACHE
 
-#if 1 // MY_SPI0_COMMAND
+#if 0 // MY_SPI0_COMMAND
+
+#include "spi_utils.h"
+
+namespace experimental {
+extern SpiOpResult PRECACHE_ATTR
+_SPICommand(volatile uint32_t spiIfNum,
+            uint32_t spic,uint32_t spiu,uint32_t spiu1,uint32_t spiu2,
+            uint32_t *data,uint32_t writeWords,uint32_t readWords);
+}
+
 static inline uint32_t calc_u1(uint32_t mosi_bits, uint32_t miso_bits) {
  if (mosi_bits!=0) mosi_bits--;
  if (miso_bits!=0) miso_bits--;
  return ((miso_bits&SPIMMISO) << SPILMISO) | ((mosi_bits&SPIMMOSI) << SPILMOSI);
 }
-
-#define SPI_RESULT_OK  0
-#define SPI_RESULT_ERR 1
-#define SPI_RESULT_TIMEOUT 2
 
 /*
  * critical part of spi0_command.
@@ -132,7 +138,7 @@ static inline uint32_t calc_u1(uint32_t mosi_bits, uint32_t miso_bits) {
  * Kept in a separate function to prevent compiler spreading the code around too much.
  * PRECACHE_* saves having to make the function IRAM_ATTR.
  */
-int PRECACHE_ATTR
+SpiOpResult PRECACHE_ATTR
 _spi_command(volatile uint32_t spiIfNum,
              uint32_t spic,uint32_t spiu,uint32_t spiu1,uint32_t spiu2,
              uint32_t *data,uint32_t write_words,uint32_t read_words)
@@ -142,7 +148,7 @@ _spi_command(volatile uint32_t spiIfNum,
   // force SPI register access via base+offest. 
   // Prevents loading individual address constants from flash.
   uint32_t *spibase = (uint32_t*)(spiIfNum ? &(SPI1CMD) : &(SPI0CMD));
-  #define SPIREG(reg) *((volatile uint32_t *)(spibase+(&(reg) - &(SPI0CMD))))
+  #define SPIREG(reg) (*((volatile uint32_t *)(spibase+(&(reg) - &(SPI0CMD)))))
 
   // preload any constants and functions we need into variables
   // Everything must be volatile or the optimizer can treat them as 
@@ -215,7 +221,8 @@ int spi0_command(uint8_t cmd, uint32_t *data, uint32_t data_bits, uint32_t read_
   uint32_t spi0c = (SPI0C & ~(SPICQIO | SPICDIO | SPICQOUT | SPICDOUT | SPICAHB | SPICFASTRD))
         | (SPICRESANDRES | SPICSHARE | SPICWPR | SPIC2BSE);
   
-  int rc = _spi_command(0,spi0c,flags,spi0u1,spi0u2,data,data_words,read_words);
+  //SpiOpResult rc = _spi_command(0,spi0c,flags,spi0u1,spi0u2,data,data_words,read_words);
+  SpiOpResult rc = experimental::_SPICommand(0,spi0c,flags,spi0u1,spi0u2,data,data_words,read_words);
   
   // clear any bits we did not read in the last word.
   if (rc==SPI_RESULT_OK) {
@@ -228,7 +235,7 @@ int spi0_command(uint8_t cmd, uint32_t *data, uint32_t data_bits, uint32_t read_
 
 #else
 #include "spi_utils.h"
-#define spi0_command SPI0Command
+#define spi0_command experimental::SPI0Command
 #endif // MY_SPI0_COMMAND
 
 // ROM functions not in user_interface.h
@@ -355,7 +362,7 @@ void flash_xmc_check() {
      int ffreq = ESP.getFlashChipSpeed()/1000000;
      if (ffreq > 26) {
         newSR3 &= ~(SPI_FLASH_XMC_DRV_MASK << SPI_FLASH_XMC_DRV_S);
-        newSR3 |= (SPI_FLASH_XMC_DRV_100 << SPI_FLASH_XMC_DRV_S);
+        newSR3 |= (SPI_FLASH_XMC_DRV_75 << SPI_FLASH_XMC_DRV_S);
      }
 
      // Additionally they have a high-frequency mode that holds pre-charge on the
@@ -436,7 +443,87 @@ const char *flashMode(uint8_t m) {
   return "UNDEFINED";
 }
 
-void flash_speed_test() {
+#include "esp8266_peri.h"
+
+
+// copy_raw - copied from the eboot bootloader.
+int copy_raw(const uint32_t src_addr,
+             const uint32_t dst_addr,
+             const uint32_t size)
+{
+  if ((src_addr & 0xfff) != 0 || (dst_addr & 0xfff) != 0)
+     return 1;
+
+  const uint32_t buffer_size = flashchip->sector_size;
+  uint8_t *buffer = (uint8_t *)malloc(buffer_size);
+  uint32_t left = (size+buffer_size-1) & ~(buffer_size-1);
+  uint32_t saddr = src_addr;
+  uint32_t daddr = dst_addr;
+  
+  while (left) {
+        if (SPIEraseSector(daddr/buffer_size)) {
+            free(buffer);
+            return 2;
+        }
+        if (SPIRead(saddr, buffer, buffer_size)) {
+            free(buffer);
+            return 3;
+        }
+        if (SPIWrite(daddr, buffer, buffer_size)) {
+            free(buffer);
+            return 4;
+        }
+        ESP.wdtFeed();
+        saddr += buffer_size;
+        daddr += buffer_size;
+        left  -= buffer_size;
+  }
+  free(buffer);
+  return 0;
+}
+
+int compare_raw(const uint32_t src1_addr,
+                const uint32_t src2_addr,
+                const uint32_t size)
+{
+  if ((src1_addr & 0xfff) != 0 || (src2_addr & 0xfff) != 0)
+     return 1;
+
+  const uint32_t buffer_size = flashchip->sector_size;
+  uint8_t *buffer1 = (uint8_t *)malloc(buffer_size);
+  uint8_t *buffer2 = (uint8_t *)malloc(buffer_size);
+  
+  uint32_t left = (size+buffer_size-1) & ~(buffer_size-1);
+  uint32_t s1addr = src1_addr;
+  uint32_t s2addr = src2_addr;
+  
+  while (left) {
+        if (SPIRead(s1addr, buffer1, buffer_size)) {
+            free(buffer1);
+            free(buffer2);
+            return 3;
+        }
+        if (SPIRead(s2addr, buffer2, buffer_size)) {
+            free(buffer1);
+            free(buffer2);
+            return 4;
+        }
+        if (memcmp(buffer1, buffer2, buffer_size)) {
+            free(buffer1);
+            free(buffer2);
+            return 5;            
+        }
+        ESP.wdtFeed();
+        s1addr += buffer_size;
+        s2addr += buffer_size;
+        left  -= buffer_size;
+  }
+  free(buffer1);
+  free(buffer2);
+  return 0;
+}
+
+void PRECACHE_ATTR flash_speed_test() {
   // read-only direct flash speed test.
   // Reads 1MB of data from the flash chip
 
@@ -454,7 +541,21 @@ void flash_speed_test() {
       flashchip->sector_size, flashchip->page_size, flashchip->status_mask);
   Serial.printf("ESP.get* :\n   ID:%08x, size:%d, realSize:%d\n", 
       ESP.getFlashChipId(), ESP.getFlashChipSize(), ESP.getFlashChipRealSize());
-
+  Serial.printf("SPI0CLK: 0x%08x\n", SPI0CLK);
+  Serial.printf("SPI0A : 0x%08x\n", SPI0A);
+  Serial.printf("SPI0C : 0x%08x\n", SPI0C);
+  Serial.printf("SPI0C1: 0x%08x\n", SPI0C1);
+  Serial.printf("SPI0C2: 0x%08x\n", SPI0C2);
+  Serial.printf("SPI0U : 0x%08x\n", SPI0U);
+  Serial.printf("SPI0U1: 0x%08x\n", SPI0U1);
+  Serial.printf("SPI0U2: 0x%08x\n", SPI0U2);
+  Serial.printf("SPI0WS: 0x%08x\n", SPI0WS);
+  Serial.printf("SPI0P : 0x%08x\n", SPI0P);
+  Serial.printf("SPI0S : 0x%08x\n", SPI0S);
+  Serial.printf("SPI0S1: 0x%08x\n", SPI0S1);
+  Serial.printf("SPI0S2: 0x%08x\n", SPI0S2);
+  Serial.printf("SPI0S3: 0x%08x\n", SPI0S3);
+  Serial.printf("SPI0E3: 0x%08x\n", SPI0E3);
   Serial.printf("Running flash read speed test, bs=%d\n",bs);
 
   uint32 startaddr= 0;
@@ -481,6 +582,76 @@ void flash_speed_test() {
      ESP.getCpuFreqMHz(), ESP.getFlashChipSpeed()/1000000, 
      flashMode(ESP.getFlashChipMode()),
      tend - tstart, (double)total/(tend - tstart));
+
+  Serial.printf("Running flash copy speed test, bs=%d, Size=1MB\n",bs);
+  tstart=-millis();
+  const uint32_t MB = 1024*1024;
+
+  uint32_t vendor = spi_flash_get_id() & 0x000000ff;
+
+  uint32_t spi0clk = SPI0CLK;
+  uint32_t spi0c   = SPI0C;
+
+//if (vendor == SPI_FLASH_VENDOR_XMC) {
+   uint32_t flashinfo=0;
+
+  if (SPIRead(0, &flashinfo, 4)) {
+     // fail
+  }
+
+#if 1
+  // There are limits to how much we can slow down depending on the current speed.
+  // This is a workaround (because we should be able to just use 20Mhz every time)
+  switch ((flashinfo >> 24) & 0x0F) {
+     case 0x0: // 40MHz, slow to 20
+     case 0x1: // 26 mhz, slow to 20
+             SPI0CLK = 0x00003043;
+             SPI0C   = 0x00EAA313;
+             break;
+     case 0x2: // 20Mhz - no change
+             break;
+     case 0xf: // 80Mhz, slow to 26
+             SPI0CLK = 0x00002002;
+             SPI0C   = 0x00EAA202;
+             break;
+     default:
+             break;
+  }
+#endif
+
+#if 0
+  switch (mhz) {
+    case 20: SPI0CLK = 0x00003043;
+             SPI0C   = 0x00EAA313;
+             break;
+    case 26: SPI0CLK = 0x00002002;
+             SPI0C   = 0x00EAA202;
+             break;
+    case 40: SPI0CLK = 0x00001001;
+             SPI0C   = 0x00EAA101;
+             break;
+    case 80: SPI0CLK = 0x80000000;
+             SPI0C   = 0x00EAB000;
+             break;
+    default: break;
+  }
+  PRECACHE_END(a);
+#endif
+//}
+    
+  int cprc = copy_raw(0*MB, 3*MB, 1*MB);
+
+  Serial.printf("SPI0CLK=%08x\n", SPI0CLK);
+  //PRECACHE_START(b);
+  SPI0CLK = spi0clk;
+  SPI0C   = spi0c;
+  //PRECACHE_END(b);
+
+  tend=millis();
+  int cmprc = compare_raw(0*MB, 3*MB, 1*MB);
+  Serial.printf("copy_raw returned %d after %ld ms\n", cprc, tend-tstart);
+  Serial.printf("  %f bytes/ms,  cmp returned %d (%s)\n\n", (double)(1*MB)/(tend - tstart), 
+     cmprc, cmprc ? "error" : "ok");
 }
 
 #endif // FLASH_SPEEDTEST
